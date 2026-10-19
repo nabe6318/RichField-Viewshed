@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>中継局 見通しマップ</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.11.0/proj4.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, "Hiragino Sans", "Yu Gothic UI", sans-serif; color: #222; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: #2b4f7a; color: #fff; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  #status { font-size: 12px; opacity: .9; }
+  header .tools { margin-left: auto; display: flex; gap: 6px; }
+  header button { padding: 5px 10px; border-radius: 6px; border: 0; background: #fff; color: #2b4f7a; font-size: 14px; cursor: pointer; }
+  #main { flex: 1; display: flex; min-height: 0; }
+  #map { flex: 1; }
+  #map.placing { cursor: crosshair; }
+  #panel { width: 380px; overflow-y: auto; border-left: 1px solid #ddd; padding: 12px 14px; background: #fafafa; font-size: 14px; }
+  .muted { color: #888; } .small { font-size: 12px; } .warn { color: #c62828; } .ok { color: #2e7d32; }
+  a.act { color: #2b4f7a; cursor: pointer; text-decoration: underline; }
+  .box { background: #fff; border: 1px solid #e3e3e3; border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+  .box h3 { font-size: 13px; margin: 0 0 6px; color: #2b4f7a; display: flex; justify-content: space-between; align-items: center; }
+  .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btns button { flex: 1; min-width: 110px; padding: 7px; font-size: 13px; border: 1px solid #2b4f7a; border-radius: 6px; background: #fff; color: #2b4f7a; cursor: pointer; }
+  .btns button.main { background: #2b4f7a; color: #fff; }
+  .btns button.on { background: #ff9800; border-color: #ff9800; color: #fff; }
+  .grid2 { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; font-size: 13px; }
+  .grid2 input, .grid2 select { width: 100%; padding: 3px 5px; font-size: 13px; }
+  .grid2 input[type=checkbox] { width: auto; vertical-align: -2px; }
+  .grid2 label { display: block; }
+  .st { display: grid; grid-template-columns: 18px 1fr auto 18px; gap: 6px; align-items: center; padding: 5px 0; border-top: 1px solid #eee; font-size: 13px; }
+  .st:first-of-type { border-top: 0; }
+  .st.sel { background: #fff8e1; }
+  .st input[type=number] { width: 54px; padding: 2px 4px; }
+  .st .x { color: #999; cursor: pointer; text-align: center; }
+  .st .nm { cursor: pointer; }
+  .legend { background: #fff; padding: 6px 9px; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.3); font-size: 12px; line-height: 1.7; }
+  .legend i { display: inline-block; width: 12px; height: 12px; margin-right: 5px; vertical-align: -1px; border: 1px solid #555; }
+  .ant { width: 22px; height: 22px; }
+  .ant div { width: 0; height: 0; border-left: 11px solid transparent; border-right: 11px solid transparent; border-bottom: 20px solid #ff9800; filter: drop-shadow(0 0 1px #000); }
+  .ant.sel div { border-bottom-color: #ff3d00; }
+  .leaflet-tooltip.stl { background: rgba(255,255,255,.9); border: 0; box-shadow: 0 0 2px rgba(0,0,0,.5); font-size: 11px; font-weight: 700; padding: 0 4px; }
+  .leaflet-tooltip.stl::before { display: none; }
+  table.cov { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.cov th, table.cov td { padding: 2px 4px; border-bottom: 1px solid #eee; text-align: left; }
+  table.cov td.r { text-align: right; font-variant-numeric: tabular-nums; }
+  .bar { height: 8px; background: #eee; border-radius: 4px; overflow: hidden; min-width: 60px; }
+  .bar span { display: block; height: 100%; }
+  #prof svg { width: 100%; height: auto; background: #f4f8fc; border: 1px solid #dde; border-radius: 4px; }
+  @media (max-width: 760px) {
+    #main { flex-direction: column; }
+    #panel { width: 100%; height: 45%; border-left: 0; border-top: 1px solid #ddd; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>中継局 見通しマップ</h1>
+    <span id="status"></span>
+    <div class="tools"><button id="locate">現在地</button></div>
+  </header>
+  <div id="main">
+    <div id="map"></div>
+    <aside id="panel"></aside>
+  </div>
+</div>
+<input type="file" id="inDem" accept=".tif,.tiff" style="display:none">
+<input type="file" id="inSt" accept=".geojson,.json" style="display:none">
+
+<script>
+// ===================== 設定(ここだけ編集すればOK) =====================
+const CONFIG = {
+  dem: { url: 'data/dem.tif', name: '興部町 664351(1m)' },      // 見通しの計算に使うDEM(平面直角座標などのGeoTIFF)
+  fields: { url: 'data/field_area.gpkg', name: 'RichField圃場2026', colorField: 'type', labelField: 'field_id' },
+  // 牛のGPS(RichiField2 と同じ Apps Script)。空なら表示しない
+  gps: { api: 'https://script.google.com/macros/s/AKfycby88t0BlfWrMXep0PYgZ_NrlBp9qSnlLl8b1YUnvpuE12gcHL5PU2JN9m1Oe0BS-YuB/exec', refreshMin: 5 },
+  defaults: {
+    antenna: 5,        // 中継局のアンテナ高(地面から、m)
+    receiver: 1.2,     // 首輪の高さ(地面から、m)
+    radius: 3000,      // 計算する最大距離(m)
+    freq: 920,         // 周波数(MHz)。LoRa/LPWA なら 920
+    res: 2,            // 計算の解像度(m)。1mは精密だが遅い
+    curvature: true,   // 地球の丸みと大気の屈折(等価地球半径 k=4/3)を考える
+    showHidden: true,  // 見通し外を赤で表示
+  },
+  categoryColors: { '採草地': '#43a047', '放牧地': '#fdd835', 'デントコーン': '#fb8c00', '貸地・未利用地・造成地': '#9e9e9e' },
+  sqlWasm: 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.wasm',
+};
+// ======================================================================
+
+const map = L.map('map', { maxZoom: 21 }).setView([44.445, 143.17], 14);
+const gsi = '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル</a>';
+const bases = {
+  '地理院 航空写真': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg', { attribution: gsi, maxNativeZoom: 18, maxZoom: 21 }),
+  '地理院 陰影起伏図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/hillshademap/{z}/{x}/{y}.png', { attribution: gsi, maxNativeZoom: 16, maxZoom: 21 }),
+  '地理院 淡色地図': L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', { attribution: gsi, maxNativeZoom: 18, maxZoom: 21 }),
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '&copy; OpenStreetMap contributors', maxNativeZoom: 19, maxZoom: 21 }),
+};
+bases['地理院 航空写真'].addTo(map);
+L.control.scale({ imperial: false }).addTo(map);
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const nf = (v, d = 0) => Number(v).toLocaleString('ja-JP', { minimumFractionDigits: d, maximumFractionDigits: d });
+const setStatus = t => document.getElementById('status').textContent = t;
+const store = { get: k => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+                set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} } };
+
+// ===================== 座標系 =====================
+// EPSGコード → proj4 定義。平面直角座標(JGD2011/JGD2000 の I〜XIX系)、UTM、緯度経度、Webメルカトル
+const CRS = {};
+const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI', 'XII', 'XIII', 'XIV', 'XV', 'XVI', 'XVII', 'XVIII', 'XIX'];
+[[33, 129.5], [33, 131], [36, 132 + 1 / 6], [33, 133.5], [36, 134 + 1 / 3], [36, 136], [36, 137 + 1 / 6], [36, 138.5], [36, 139 + 5 / 6],
+ [40, 140 + 5 / 6], [44, 140.25], [44, 142.25], [44, 144.25], [26, 142], [26, 127.5], [26, 124], [26, 131], [20, 136], [26, 154]]
+  .forEach(([lat, lon], i) => {
+    const def = `+proj=tmerc +lat_0=${lat} +lon_0=${lon} +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +units=m +no_defs`;
+    CRS[6669 + i] = { def, label: `JGD2011 平面直角 ${ROMAN[i]}系` };
+    CRS[2443 + i] = { def, label: `JGD2000 平面直角 ${ROMAN[i]}系` };
+  });
+for (let z = 51; z <= 55; z++) {
+  CRS[6688 + z - 51] = { def: `+proj=utm +zone=${z} +ellps=GRS80 +units=m +no_defs`, label: `JGD2011 UTM ${z}N` };
+  CRS[3097 + z - 51] = { def: `+proj=utm +zone=${z} +ellps=GRS80 +units=m +no_defs`, label: `JGD2000 UTM ${z}N` };
+  CRS[32600 + z] = { def: `+proj=utm +zone=${z} +datum=WGS84 +units=m +no_defs`, label: `WGS84 UTM ${z}N` };
+}
+[[4326, 'WGS84 緯度経度'], [6668, 'JGD2011 緯度経度'], [4612, 'JGD2000 緯度経度']].forEach(([e, l]) => CRS[e] = { def: '+proj=longlat +ellps=GRS80 +no_defs', label: l, geo: true });
+CRS[3857] = { def: 'EPSG:3857', label: 'Webメルカトル' };
+const IDT = { forward: c => [c[0], c[1]], inverse: c => [c[0], c[1]] };
+const trOf = epsg => CRS[epsg].geo ? IDT : proj4('EPSG:4326', CRS[epsg].def);
+function askCrs(name, hint) {
+  const v = (prompt(`「${name}」の座標系を判定できませんでした${hint ? `(コード ${hint})` : ''}。\nEPSGコード(例 6680)、または平面直角座標の系番号(1〜19)を入力してください`) || '').trim();
+  if (!v) return 0;
+  const n = parseInt(v, 10);
+  const e = n >= 1 && n <= 19 ? 6668 + n : n;
+  if (!CRS[e]) { alert(`EPSG:${e} には対応していません`); return 0; }
+  return e;
+}
+const crsName = e => `${CRS[e].label}(EPSG:${e})`;
+
+// ===================== GPKG / GeoJSON の読み込み =====================
+let sqlP = null;
+const sqlLib = () => sqlP ||= initSqlJs({ locateFile: () => CONFIG.sqlWasm });
+
+// WKB → GeoJSONジオメトリ(Z・Mは捨てる)
+function readWkb(dv, o) {
+  const le = dv.getUint8(o) === 1; o += 1;
+  let t = dv.getUint32(o, le); o += 4;
+  let dim = 2;
+  if (t & 0x80000000) dim++; if (t & 0x40000000) dim++;          // EWKB
+  t &= 0x0fffffff;
+  if (t > 1000) { const k = Math.floor(t / 1000); dim = k === 3 ? 4 : 3; t %= 1000; }   // ISO
+  const pt = () => { const x = dv.getFloat64(o, le), y = dv.getFloat64(o + 8, le); o += 8 * dim; return [x, y]; };
+  const n = () => { const v = dv.getUint32(o, le); o += 4; return v; };
+  const line = () => { const k = n(), a = []; for (let i = 0; i < k; i++) a.push(pt()); return a; };
+  const poly = () => { const k = n(), a = []; for (let i = 0; i < k; i++) a.push(line()); return a; };
+  const multi = () => { const k = n(), a = []; for (let i = 0; i < k; i++) { const r = readWkb(dv, o); o = r.o; a.push(r.g); } return a; };
+  let g;
+  if (t === 1) g = { type: 'Point', coordinates: pt() };
+  else if (t === 2) g = { type: 'LineString', coordinates: line() };
+  else if (t === 3) g = { type: 'Polygon', coordinates: poly() };
+  else if (t === 4) g = { type: 'MultiPoint', coordinates: multi().map(x => x.coordinates) };
+  else if (t === 5) g = { type: 'MultiLineString', coordinates: multi().map(x => x.coordinates) };
+  else if (t === 6) g = { type: 'MultiPolygon', coordinates: multi().map(x => x.coordinates) };
+  else if (t === 7) g = { type: 'GeometryCollection', geometries: multi() };
+  else throw new Error('未対応のジオメトリ型 ' + t);
+  return { g, o };
+}
+function gpkgGeom(blob) {   // GeoPackageのジオメトリBLOB(GPヘッダー + WKB)
+  if (!blob || blob.length < 8 || blob[0] !== 0x47 || blob[1] !== 0x50) return null;
+  const flags = blob[3];
+  if (flags & 0x10) return null;                          // 空のジオメトリ
+  const env = [0, 32, 48, 48, 64][(flags >> 1) & 7] || 0;
+  const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  return readWkb(dv, 8 + env).g;
+}
+// 座標を緯度経度に変換(関数 f は [x,y] → [lng,lat])
+function mapCoords(g, f) {
+  const m = c => typeof c[0] === 'number' ? f(c) : c.map(m);
+  return g.type === 'GeometryCollection' ? { ...g, geometries: g.geometries.map(x => mapCoords(x, f)) } : { ...g, coordinates: m(g.coordinates) };
+}
+function toLonLat(epsg, wkt, name) {
+  if (CRS[epsg]) return CRS[epsg].geo ? null : c => trOf(epsg).inverse(c);
+  if (wkt) try { const p = proj4(wkt, 'EPSG:4326'); return c => p.forward(c); } catch {}
+  const e = askCrs(name, epsg); if (!e) throw new Error('座標系が指定されませんでした');
+  return CRS[e].geo ? null : c => trOf(e).inverse(c);
+}
+
+async function readGpkg(buf, name) {
+  const SQL = await sqlLib();
+  const db = new SQL.Database(new Uint8Array(buf));
+  const q = (s, p) => { const st = db.prepare(s); if (p) st.bind(p); const out = []; while (st.step()) out.push(st.getAsObject()); st.free(); return out; };
+  try {
+    const tables = q(`SELECT c.table_name AS t, g.column_name AS col, g.srs_id AS srs FROM gpkg_contents c
+                      JOIN gpkg_geometry_columns g ON g.table_name = c.table_name WHERE c.data_type = 'features'`);
+    if (!tables.length) throw new Error('ポリゴンなどの地物レイヤがありません');
+    return tables.map(({ t, col, srs }) => {
+      const s = q('SELECT organization AS org, organization_coordsys_id AS id, definition AS def FROM gpkg_spatial_ref_sys WHERE srs_id = ?', [srs])[0] || {};
+      const epsg = String(s.org || '').toUpperCase() === 'EPSG' ? s.id : srs;
+      const f = srs === 0 ? null : toLonLat(epsg, s.def && s.def !== 'undefined' ? s.def : '', `${name} / ${t}`);
+      const feats = [];
+      q(`SELECT * FROM "${t.replace(/"/g, '""')}"`).forEach(r => {
+        const g = gpkgGeom(r[col]); delete r[col];
+        if (!g) return;
+        Object.keys(r).forEach(k => { if (r[k] instanceof Uint8Array) delete r[k]; });
+        feats.push({ type: 'Feature', properties: r, geometry: f ? mapCoords(g, f) : g });
+      });
+      return { name: tables.length > 1 ? `${name} / ${t}` : name, fc: { type: 'FeatureCollection', features: feats }, crs: CRS[epsg] ? crsName(epsg) : `srs ${srs}` };
+    });
+  } finally { db.close(); }
+}
+function readGeoJSON(text, name) {
+  const g = JSON.parse(text);
+  const fc = g.type === 'FeatureCollection' ? g : { type: 'FeatureCollection', features: [g.type === 'Feature' ? g : { type: 'Feature', properties: {}, geometry: g }] };
+  const m = String(g.crs?.properties?.name || '').match(/EPSG:{1,2}(\d+)/i);
+  const epsg = m ? +m[1] : 4326;
+  const f = toLonLat(epsg, '', name);
+  if (f) fc.features.forEach(x => { if (x.geometry) x.geometry = mapCoords(x.geometry, f); });
+  return [{ name, fc, crs: CRS[epsg] ? crsName(epsg) : '' }];
+}
+
+// ===================== 状態 =====================
+const P = Object.assign({}, CONFIG.defaults);
+let stations = [];          // { id, name, lat, lng, ant, on, vis(Uint8Array: 0未計算 1見通し外 2見通し), zg }
+let selId = null, placing = false, nextNo = 1;
+try {
+  const s = JSON.parse(store.get('vs-state') || 'null');
+  if (s) { Object.assign(P, s.params || {}); stations = (s.stations || []).map(x => ({ ...x, vis: null })); nextNo = s.nextNo || stations.length + 1; selId = s.selId || null; }
+} catch {}
+const saveState = () => store.set('vs-state', JSON.stringify({ params: P, nextNo, selId,
+  stations: stations.map(({ id, name, lat, lng, ant, on }) => ({ id, name, lat, lng, ant, on })) }));
+
+// ===================== DEM =====================
+let DEM = null, G = null;   // DEM:元のGeoTIFF、G:計算用のグリッド(解像度 P.res)
+const demFrame = L.polygon([], { color: '#ffeb3b', weight: 2, dashArray: '6 6', fill: false, interactive: false }).addTo(map);
+async function openDem(src, name) {
+  setStatus('DEMを読み込み中…');
+  const tiff = typeof src === 'string' ? await GeoTIFF.fromUrl(src) : await GeoTIFF.fromBlob(src);
+  const img = await tiff.getImage();
+  const gk = img.getGeoKeys() || {};
+  let epsg = gk.ProjectedCSTypeGeoKey || (gk.GTModelTypeGeoKey === 2 ? (gk.GeographicTypeGeoKey || 4326) : 0);
+  if (!CRS[epsg]) { epsg = askCrs(name, epsg); if (!epsg) throw new Error('座標系が指定されませんでした'); }
+  if (CRS[epsg].geo) throw new Error('緯度経度のDEMには対応していません。QGISで平面直角座標(例 XII系 EPSG:6680)に変換してください');
+  const [ox, oy] = img.getOrigin(), [rx, ry] = img.getResolution();
+  DEM = { name, tiff, img, epsg, tr: trOf(epsg), ox, oy, dx: rx, dy: Math.abs(ry), W: img.getWidth(), H: img.getHeight(), nodata: img.getGDALNoData() };
+  const ex = [ox, ox + DEM.W * DEM.dx], ey = [oy, oy - DEM.H * DEM.dy], ring = [];
+  for (let k = 0; k <= 4; k++) ring.push([ex[0] + (ex[1] - ex[0]) * k / 4, ey[0]]);
+  for (let k = 0; k <= 4; k++) ring.push([ex[1], ey[0] + (ey[1] - ey[0]) * k / 4]);
+  for (let k = 0; k <= 4; k++) ring.push([ex[1] - (ex[1] - ex[0]) * k / 4, ey[1]]);
+  for (let k = 0; k <= 4; k++) ring.push([ex[0], ey[1] - (ey[1] - ey[0]) * k / 4]);
+  demFrame.setLatLngs(ring.map(c => DEM.tr.inverse(c)).map(([x, y]) => [y, x]));
+  await buildGrid();
+}
+// 指定の解像度でDEMを読み込む(COGなら縮小版を使うので速い)
+async function buildGrid() {
+  const res = Math.max(P.res, DEM.dx);
+  const w = Math.max(2, Math.round(DEM.W * DEM.dx / res)), h = Math.max(2, Math.round(DEM.H * DEM.dy / res));
+  setStatus(`DEMを読み込み中…(${nf(w)}×${nf(h)} セル)`);
+  const [band] = await DEM.tiff.readRasters({ width: w, height: h, samples: [0], resampleMethod: 'bilinear' });
+  const z = new Float32Array(w * h);
+  for (let i = 0; i < z.length; i++) { const v = band[i]; z[i] = (v === DEM.nodata || !Number.isFinite(v) || v < -1000) ? NaN : v; }
+  G = { w, h, z, rx: DEM.W * DEM.dx / w, ry: DEM.H * DEM.dy / h, ox: DEM.ox, oy: DEM.oy };
+  stations.forEach(s => s.vis = null);
+  rasterFields();
+}
+const zAt = (c, r) => { if (c < 0 || r < 0 || c > G.w - 1 || r > G.h - 1) return NaN;   // c,r:セル中心基準の連続座標
+  const c0 = Math.floor(c), r0 = Math.floor(r), c1 = Math.min(c0 + 1, G.w - 1), r1 = Math.min(r0 + 1, G.h - 1), fc = c - c0, fr = r - r0;
+  const a = G.z[r0 * G.w + c0], b = G.z[r0 * G.w + c1], d = G.z[r1 * G.w + c0], e = G.z[r1 * G.w + c1];
+  return (a * (1 - fc) + b * fc) * (1 - fr) + (d * (1 - fc) + e * fc) * fr; };
+const toGrid = (lat, lng) => { const [x, y] = DEM.tr.forward([lng, lat]); return [(x - G.ox) / G.rx, (G.oy - y) / G.ry]; };   // セルの左上基準
+const R_EARTH = 6371000;
+
+// ===================== 見通しの計算 =====================
+// 中継局から周囲のすべての方向にレイを飛ばし、途中の地形で一番高く見える角度より上にあれば「見通しあり」
+// 受信側(首輪)の高さを加えて判定。地球の丸みは 距離²/(2kR) だけ地面を下げて扱う(k=4/3)
+function computeStation(s) {
+  const t0 = performance.now();
+  const [gc, gr] = toGrid(s.lat, s.lng);                // 連続座標(セル左上基準)
+  const cx = gc - 0.5, cy = gr - 0.5;                    // セル中心基準
+  s.vis = new Uint8Array(G.w * G.h);
+  s.zg = zAt(cx, cy);
+  if (!Number.isFinite(s.zg)) { s.out = true; return; }
+  s.out = false;
+  const zo = s.zg + s.ant, hr = P.receiver, res = Math.min(G.rx, G.ry);
+  const kR2 = P.curvature ? 2 * (4 / 3) * R_EARTH : Infinity;
+  const r = Math.ceil(P.radius / res), ic = Math.round(cx), ir = Math.round(cy);
+  const vis = s.vis, w = G.w, h = G.h, z = G.z, rx = G.rx, ry = G.ry, R2 = P.radius * P.radius;
+  if (ic >= 0 && ir >= 0 && ic < w && ir < h) vis[ir * w + ic] = 2;
+  const ray = (tx, ty) => {
+    const dx = tx - cx, dy = ty - cy, n = Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)));
+    let maxS = -Infinity;
+    for (let i = 1; i <= n; i++) {
+      const x = cx + dx * i / n, y = cy + dy * i / n;
+      const c = Math.round(x), rr = Math.round(y);
+      if (c < 0 || rr < 0 || c >= w || rr >= h) return;
+      const ddx = (x - cx) * rx, ddy = (y - cy) * ry, d2 = ddx * ddx + ddy * ddy;
+      if (d2 > R2) return;
+      const zz = z[rr * w + c]; if (zz !== zz) continue;      // NaN(DEMなし)は飛ばす
+      const d = Math.sqrt(d2), zc = zz - d2 / kR2;
+      const k = rr * w + c;
+      if ((zc + hr - zo) / d >= maxS) vis[k] = 2; else if (vis[k] === 0) vis[k] = 1;
+      const sl = (zc - zo) / d; if (sl > maxS) maxS = sl;
+    }
+  };
+  for (let t = -r; t <= r; t++) { ray(cx + t, cy - r); ray(cx + t, cy + r); ray(cx - r, cy + t); ray(cx + r, cy + t); }
+  s.ms = performance.now() - t0;
+}
+// 全局を重ね合わせ:cnt = 見通しのある局の数、done = 計算済み
+let CNT = null, DONE = null;
+function combine() {
+  if (!G) return;
+  CNT = new Uint8Array(G.w * G.h); DONE = new Uint8Array(G.w * G.h);
+  stations.filter(s => s.on && s.vis).forEach(s => { const v = s.vis; for (let i = 0; i < v.length; i++) { if (v[i]) DONE[i] = 1; if (v[i] === 2) CNT[i]++; } });
+}
+async function recompute(ids) {
+  if (!G) return;
+  const t0 = performance.now();
+  stations.forEach(s => { if (!s.vis || !ids || ids.includes(s.id)) computeStation(s); });
+  combine(); coverLayer.redraw(); updateCoverage(); drawGps(); drawProfile();
+  const on = stations.filter(s => s.on).length;
+  setStatus(on ? `見通しを計算しました(${on}局・${nf(performance.now() - t0)} ms・解像度 ${nf(Math.min(G.rx, G.ry), 1)} m)` : '');
+  render();
+}
+
+// ===================== 地図への描画(タイルごとに、画素の位置をDEMのセルに対応させて塗る) =====================
+const COLORS = { 1: [67, 160, 71, 115], 2: [21, 101, 192, 125], hid: [229, 57, 53, 85] };
+const CoverLayer = L.GridLayer.extend({
+  createTile(coords) {
+    const tile = document.createElement('canvas'), sz = this.getTileSize();
+    tile.width = sz.x; tile.height = sz.y;
+    if (!G || !CNT) return tile;
+    const crs = this._map.options.crs, z = coords.z;
+    const corner = (px, py) => { const ll = crs.pointToLatLng(L.point(coords.x * sz.x + px, coords.y * sz.y + py), z); return toGrid(ll.lat, ll.lng); };
+    const a = corner(0, 0), b = corner(sz.x, 0), c = corner(0, sz.y), d = corner(sz.x, sz.y);
+    const mn = [Math.min(a[0], b[0], c[0], d[0]), Math.min(a[1], b[1], c[1], d[1])], mx = [Math.max(a[0], b[0], c[0], d[0]), Math.max(a[1], b[1], c[1], d[1])];
+    if (mx[0] < 0 || mx[1] < 0 || mn[0] > G.w || mn[1] > G.h) return tile;
+    const ctx = tile.getContext('2d'), im = ctx.createImageData(sz.x, sz.y), px = im.data;
+    for (let j = 0; j < sz.y; j++) {
+      const v = (j + 0.5) / sz.y;
+      const lx = a[0] + (c[0] - a[0]) * v, ly = a[1] + (c[1] - a[1]) * v, rxx = b[0] + (d[0] - b[0]) * v, ryy = b[1] + (d[1] - b[1]) * v;
+      for (let i = 0; i < sz.x; i++) {
+        const u = (i + 0.5) / sz.x, gx = Math.floor(lx + (rxx - lx) * u), gy = Math.floor(ly + (ryy - ly) * u);
+        if (gx < 0 || gy < 0 || gx >= G.w || gy >= G.h) continue;
+        const k = gy * G.w + gx;
+        const col = CNT[k] >= 2 ? COLORS[2] : CNT[k] === 1 ? COLORS[1] : (P.showHidden && DONE[k]) ? COLORS.hid : null;
+        if (!col) continue;
+        const o = (j * sz.x + i) * 4; px[o] = col[0]; px[o + 1] = col[1]; px[o + 2] = col[2]; px[o + 3] = col[3];
+      }
+    }
+    ctx.putImageData(im, 0, 0);
+    return tile;
+  },
+});
+const coverLayer = new CoverLayer({ opacity: 1, zIndex: 300, maxZoom: 21 }).addTo(map);
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = () => { const d = L.DomUtil.create('div', 'legend');
+  d.innerHTML = `<b>首輪(${'<span id="lgH"></span>'}m)からの見通し</b><br><i style="background:rgba(67,160,71,.6)"></i>1局から見通しあり<br>
+    <i style="background:rgba(21,101,192,.6)"></i>2局以上から見通しあり<br><i style="background:rgba(229,57,53,.45)"></i>見通し外(計算範囲内)<br>
+    <i style="background:transparent;border:2px dashed #e6c400"></i>DEMの範囲`; return d; };
+legend.addTo(map);
+
+// ===================== 中継局 =====================
+const stLayer = L.layerGroup().addTo(map);
+const markers = {};
+const icon = sel => L.divIcon({ className: 'ant' + (sel ? ' sel' : ''), html: '<div></div>', iconSize: [22, 22], iconAnchor: [11, 20] });
+function drawStations() {
+  stLayer.clearLayers();
+  stations.forEach(s => {
+    const m = L.marker([s.lat, s.lng], { icon: icon(s.id === selId), draggable: true, opacity: s.on ? 1 : 0.4, zIndexOffset: 1000 })
+      .bindTooltip(esc(s.name), { permanent: true, direction: 'top', offset: [0, -20], className: 'stl' })
+      .on('click', () => { selId = s.id; saveState(); drawStations(); drawProfile(); render(); })
+      .on('dragend', e => { const ll = e.target.getLatLng(); s.lat = ll.lat; s.lng = ll.lng; selId = s.id; saveState(); drawStations(); recompute([s.id]); });
+    stLayer.addLayer(m); markers[s.id] = m;
+  });
+}
+function addStation(ll) {
+  const s = { id: 'S' + Date.now().toString(36), name: `中継局${nextNo++}`, lat: ll.lat, lng: ll.lng, ant: P.antenna, on: true, vis: null };
+  stations.push(s); selId = s.id; saveState(); drawStations(); recompute([s.id]);
+}
+map.on('click', e => {
+  if (placing) { placing = false; document.getElementById('map').classList.remove('placing'); addStation(e.latlng); return; }
+  if (stations.length && G) { target = e.latlng; drawProfile(); }
+});
+
+// ===================== 断面図(中継局 → クリックした地点) =====================
+let target = null;
+const profLine = L.polyline([], { weight: 3, dashArray: '6 4', interactive: false }).addTo(map);
+const profPt = L.circleMarker([0, 0], { radius: 6, weight: 2, color: '#fff', fillOpacity: 1, interactive: false });
+function profileData(s, t) {
+  const [c0, r0] = toGrid(s.lat, s.lng), [c1, r1] = toGrid(t.lat, t.lng);
+  const ddx = (c1 - c0) * G.rx, ddy = (r1 - r0) * G.ry, D = Math.hypot(ddx, ddy);
+  const n = Math.max(2, Math.ceil(D / Math.min(G.rx, G.ry)));
+  const kR2 = P.curvature ? 2 * (4 / 3) * R_EARTH : Infinity, lam = 299.792458 / P.freq;
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const f = i / n, d = D * f;
+    const zr = zAt(c0 + (c1 - c0) * f - 0.5, r0 + (r1 - r0) * f - 0.5);
+    pts.push({ d, z: zr, zc: zr - d * (D - d) / kR2 });     // 両端を結ぶ直線から見た地面の膨らみ
+  }
+  const zA = pts[0].z + s.ant, zB = pts[n].z + P.receiver;
+  let minRatio = Infinity, minClear = Infinity, block = null;
+  pts.forEach((p, i) => {
+    p.los = zA + (zB - zA) * p.d / D;
+    p.f1 = Math.sqrt(lam * p.d * (D - p.d) / D);
+    if (i === 0 || i === n || !Number.isFinite(p.zc)) return;
+    const cl = p.los - p.zc;
+    if (cl < minClear) { minClear = cl; }
+    const ratio = p.f1 > 0 ? cl / p.f1 : Infinity;
+    if (ratio < minRatio) { minRatio = ratio; block = p; }
+  });
+  const fspl = 20 * Math.log10(Math.max(D, 1) / 1000) + 20 * Math.log10(P.freq) + 32.44;
+  return { pts, D, zA, zB, minRatio, minClear, block, fspl };
+}
+function drawProfile() {
+  const box = document.getElementById('prof');
+  const s = stations.find(x => x.id === selId) || stations[0];
+  if (!target || !s || !G) { profLine.setLatLngs([]); profPt.remove(); if (box) box.innerHTML = '<div class="small muted">中継局を置いたあと、地図をクリックすると、その地点までの地形の断面と電波の通り具合を表示します。</div>'; return; }
+  const P1 = profileData(s, target);
+  const verdict = P1.minClear < 0 ? ['見通しなし(地形で遮られる)', 'warn', '#e53935']
+    : P1.minRatio < 0.6 ? ['見通しあり(フレネルゾーンが一部遮られる)', '', '#fb8c00'] : ['見通し良好(フレネルゾーン60%以上を確保)', 'ok', '#43a047'];
+  profLine.setLatLngs([[s.lat, s.lng], target]).setStyle({ color: verdict[2] });
+  profPt.setLatLng(target).setStyle({ fillColor: verdict[2] }).addTo(map);
+  if (!box) return;
+  // SVGで断面図
+  const W = 340, H = 170, m = { l: 40, r: 8, t: 8, b: 22 };
+  const zs = P1.pts.flatMap(p => [p.zc, p.los - 0.6 * p.f1, p.los + 0.6 * p.f1]).filter(Number.isFinite);
+  let zmin = Math.min(...zs), zmax = Math.max(...zs, P1.zA); const pad = (zmax - zmin) * 0.08 + 1; zmin -= pad; zmax += pad;
+  const X = d => m.l + (W - m.l - m.r) * d / P1.D, Y = z => H - m.b - (H - m.t - m.b) * (z - zmin) / (zmax - zmin);
+  const ok = P1.pts.filter(p => Number.isFinite(p.zc));
+  const terr = `M${X(0)},${Y(zmin)} ` + ok.map(p => `L${X(p.d).toFixed(1)},${Y(p.zc).toFixed(1)}`).join(' ') + ` L${X(P1.D)},${Y(zmin)} Z`;
+  const fr = (sgn) => P1.pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.d).toFixed(1)},${Y(p.los + sgn * 0.6 * p.f1).toFixed(1)}`).join(' ');
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map(f => `<text x="${X(P1.D * f)}" y="${H - 6}" font-size="9" text-anchor="middle" fill="#555">${nf(P1.D * f)}</text>`).join('');
+  const zt = [zmin + pad, (zmin + zmax) / 2, zmax - pad].map(z => `<text x="${m.l - 3}" y="${Y(z) + 3}" font-size="9" text-anchor="end" fill="#555">${nf(z)}</text>`).join('');
+  const blk = P1.block && P1.minRatio < 0.6 ? `<circle cx="${X(P1.block.d)}" cy="${Y(P1.block.zc)}" r="3.5" fill="${verdict[2]}"/>` : '';
+  box.innerHTML = `<div class="small"><b>${esc(s.name)}</b> → クリック地点</div>
+    <svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+      <path d="${terr}" fill="#a1887f" fill-opacity=".75" stroke="#6d4c41" stroke-width="1"/>
+      <path d="${fr(1)}" fill="none" stroke="#1e88e5" stroke-dasharray="4 3" stroke-width="1"/>
+      <path d="${fr(-1)}" fill="none" stroke="#1e88e5" stroke-dasharray="4 3" stroke-width="1"/>
+      <line x1="${X(0)}" y1="${Y(P1.zA)}" x2="${X(P1.D)}" y2="${Y(P1.zB)}" stroke="${verdict[2]}" stroke-width="2"/>
+      <line x1="${X(0)}" y1="${Y(P1.pts[0].z)}" x2="${X(0)}" y2="${Y(P1.zA)}" stroke="#ff6f00" stroke-width="3"/>
+      ${blk}${ticks}${zt}
+      <text x="${W - m.r}" y="${m.t + 9}" font-size="9" text-anchor="end" fill="#555">距離 m / 標高 m</text>
+    </svg>
+    <div class="small ${verdict[1]}" style="margin-top:3px"><b>${verdict[0]}</b></div>
+    <div class="small">距離 ${nf(P1.D)} m ・ 自由空間損失 ${P1.fspl.toFixed(1)} dB(${P.freq} MHz)<br>
+      余裕(視線と地面の最小の差)${P1.minClear.toFixed(1)} m ・ 第1フレネル半径に対する比 ${Number.isFinite(P1.minRatio) ? (P1.minRatio * 100).toFixed(0) + '%' : '-'}<br>
+      <span class="muted">茶:地形(地球の丸みを考慮)、線:アンテナ→首輪の視線、青点線:フレネルゾーン60%</span></div>`;
+}
+
+// ===================== 圃場レイヤと、圃場ごとの見通し率 =====================
+let FIELDS = null, FIDX = null, fieldLayer = null, catColor = {};
+async function loadFields() {
+  const F = CONFIG.fields; if (!F?.url) return;
+  try {
+    const r = await fetch(F.url); if (!r.ok) throw new Error(r.status);
+    const list = /\.gpkg$/i.test(F.url) ? await readGpkg(await r.arrayBuffer(), F.name) : readGeoJSON(await r.text(), F.name);
+    FIELDS = list[0].fc.features.filter(f => f.geometry && /Polygon/.test(f.geometry.type));
+    const pal = ['#00e5ff', '#e040fb', '#f44336', '#3f51b5', '#cddc39'];
+    let i = 0;
+    FIELDS.forEach(f => { const k = String(f.properties[F.colorField] ?? ''); if (!catColor[k]) catColor[k] = CONFIG.categoryColors[k] || pal[i++ % pal.length]; });
+    fieldLayer = L.geoJSON({ type: 'FeatureCollection', features: FIELDS }, {
+      style: f => { const c = catColor[String(f.properties[F.colorField] ?? '')]; return { color: c, weight: 2, fill: true, fillOpacity: 0, opacity: 0.9 }; },
+      onEachFeature: (f, l) => l.bindTooltip(() => `${esc(F.labelField ? f.properties[F.labelField] : '')} ${esc(f.properties[F.colorField] ?? '')}` +
+        (f._cov !== undefined ? `<br>見通し ${(f._cov * 100).toFixed(0)}%` : ''), { sticky: true }),
+    }).addTo(map);
+    fieldLayer.eachLayer(l => l.on('click', e => { L.DomEvent.stopPropagation(e); map.fire('click', { latlng: e.latlng }); }));
+    layerCtl.addOverlay(fieldLayer, esc(F.name));
+    rasterFields();
+  } catch (e) { console.warn('圃場', e); }
+}
+// 圃場ポリゴンを計算用グリッドに焼き込む(セル → 圃場の番号)
+function rasterFields() {
+  if (!FIELDS || !G) return;
+  FIDX = new Int16Array(G.w * G.h).fill(-1);
+  FIELDS.forEach((f, fi) => {
+    const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+    const rings = polys.flat().map(r => r.map(c => toGrid(c[1], c[0])));
+    const ys = rings.flat().map(p => p[1]);
+    const ra = Math.max(0, Math.floor(Math.min(...ys))), rb = Math.min(G.h - 1, Math.ceil(Math.max(...ys)));
+    for (let r = ra; r <= rb; r++) {
+      const y = r + 0.5, xs = [];
+      rings.forEach(ring => { for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > y) !== (yj > y)) xs.push(xi + (y - yi) / (yj - yi) * (xj - xi)); } });
+      xs.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < xs.length; k += 2)
+        for (let c = Math.max(0, Math.ceil(xs[k] - 0.5)); c <= Math.min(G.w - 1, Math.floor(xs[k + 1] - 0.5)); c++) FIDX[r * G.w + c] = fi;
+    }
+  });
+}
+function updateCoverage() {
+  if (!FIELDS || !FIDX || !CNT) return;
+  const tot = new Float64Array(FIELDS.length), vis = new Float64Array(FIELDS.length);
+  for (let i = 0; i < FIDX.length; i++) { const f = FIDX[i]; if (f < 0) continue; tot[f]++; if (CNT[i]) vis[f]++; }
+  FIELDS.forEach((f, i) => { f._cov = tot[i] ? vis[i] / tot[i] : undefined; f._cells = tot[i]; });
+}
+
+// ===================== 牛のGPS(最新位置が見通し内か) =====================
+const gpsLayer = L.layerGroup().addTo(map);
+let gpsData = null;
+async function loadGps() {
+  if (!CONFIG.gps?.api) return;
+  try {
+    const r = await fetch(CONFIG.gps.api + (CONFIG.gps.api.includes('?') ? '&' : '?') + 'hours=0.5&t=' + Date.now());
+    const j = JSON.parse(await r.text()); if (!j.ok) throw new Error(j.error);
+    gpsData = j; drawGps(); render();
+  } catch (e) { console.warn('GPS', e); }
+}
+function cowLatest() {
+  if (!gpsData) return [];
+  const last = {};
+  gpsData.rows.forEach(([t, id, lat, lon, X, Y, zone]) => {
+    let ll = [lat, lon];
+    if (Number.isFinite(X) && CRS[6668 + Number(zone)]) { const [x, y] = trOf(6668 + Number(zone)).inverse([Y, X]); ll = [y, x]; }
+    last[id] = { t, ll };
+  });
+  return gpsData.cows.filter(c => last[c.id]).map(c => {
+    const p = last[c.id]; let st = null;
+    if (G && CNT) { const [gc, gr] = toGrid(p.ll[0], p.ll[1]); const k = Math.floor(gr) * G.w + Math.floor(gc);
+      if (gc >= 0 && gr >= 0 && gc < G.w && gr < G.h) st = CNT[k] ? 'in' : DONE[k] ? 'out' : null; }
+    return { ...c, ...p, st };
+  });
+}
+function drawGps() {
+  gpsLayer.clearLayers();
+  cowLatest().forEach(c => gpsLayer.addLayer(L.circleMarker(c.ll, { radius: 6, color: c.st === 'in' ? '#00e676' : c.st === 'out' ? '#ff1744' : '#fff', weight: 3, fillColor: c.color, fillOpacity: 1 })
+    .bindTooltip(`${esc(c.id)}`, { permanent: true, direction: 'right', offset: [6, 0], className: 'stl' })
+    .bindPopup(`<b>${esc(c.id)}</b> ${esc(c.name)}<br>${esc(c.t)}<br>${c.st === 'in' ? '<span class="ok">中継局から見通しあり</span>' : c.st === 'out' ? '<span class="warn">見通し外</span>' : '計算範囲外'}`)));
+}
+
+// ===================== 右パネル =====================
+const layerCtl = L.control.layers(bases, {}).addTo(map);
+layerCtl.addOverlay(coverLayer, '見通し'); layerCtl.addOverlay(stLayer, '中継局'); layerCtl.addOverlay(gpsLayer, '牛の位置(GPS)');
+function render() {
+  const $ = id => document.getElementById(id);
+  const lg = $('lgH'); if (lg) lg.textContent = P.receiver;
+  const stList = stations.map(s => `<div class="st ${s.id === selId ? 'sel' : ''}" data-id="${s.id}">
+      <input type="checkbox" data-k="on" ${s.on ? 'checked' : ''} title="表示">
+      <div><span class="nm" data-k="sel"><b>${esc(s.name)}</b></span> <a class="act small" data-k="ren">名前</a>
+        <div class="small muted">${s.out ? '<span class="warn">DEMの範囲外</span>' : Number.isFinite(s.zg) ? `標高 ${s.zg.toFixed(1)} m → アンテナ ${(s.zg + s.ant).toFixed(1)} m` : '計算中…'}</div></div>
+      <div class="small">高さ <input type="number" data-k="ant" value="${s.ant}" min="0.5" max="100" step="0.5"> m</div>
+      <span class="x" data-k="del" title="削除">×</span></div>`).join('');
+  const cov = FIELDS && CNT && stations.some(s => s.on) ? (() => {
+    const F = CONFIG.fields, rows = FIELDS.map(f => f).filter(f => f._cells).sort((a, b) => a._cov - b._cov);
+    const byCat = {}; rows.forEach(f => { const k = String(f.properties[F.colorField] ?? ''); (byCat[k] ||= [0, 0]); byCat[k][0] += f._cov * f._cells; byCat[k][1] += f._cells; });
+    return `<div class="box"><h3>圃場ごとの見通し率 <a class="act small" id="covCsv">CSV</a></h3>
+      <div class="small" style="margin-bottom:4px">${Object.entries(byCat).map(([k, v]) => `<span style="color:${catColor[k]}">■</span>${esc(k)} ${(v[0] / v[1] * 100).toFixed(0)}%`).join(' ・ ')}</div>
+      <div style="max-height:230px;overflow-y:auto"><table class="cov"><tr><th>${esc(F.labelField)}</th><th>${esc(F.colorField)}</th><th>見通し</th><th></th></tr>
+      ${rows.map((f, i) => `<tr data-f="${FIELDS.indexOf(f)}" style="cursor:pointer"><td>${esc(f.properties[F.labelField])}</td><td>${esc(f.properties[F.colorField])}</td>
+        <td class="r">${(f._cov * 100).toFixed(0)}%</td><td><div class="bar"><span style="width:${f._cov * 100}%;background:${f._cov > 0.9 ? '#43a047' : f._cov > 0.5 ? '#fb8c00' : '#e53935'}"></span></div></td></tr>`).join('')}
+      </table></div></div>`; })() : '';
+  const cows = cowLatest();
+  const gpsBox = CONFIG.gps?.api ? `<div class="box"><h3>牛の位置(最新)</h3>${cows.length ? `<div class="small">${cows.filter(c => c.st === 'in').length} / ${cows.length} 頭が見通し内</div>
+      ${cows.map(c => `<div class="small"><span style="color:${c.color}">●</span> ${esc(c.id)} ${esc(c.t.slice(11, 16))} ${c.st === 'in' ? '<span class="ok">見通しあり</span>' : c.st === 'out' ? '<span class="warn">見通し外</span>' : '<span class="muted">計算範囲外</span>'}</div>`).join('')}` : '<div class="small muted">読み込み中…</div>'}</div>` : '';
+  $('panel').innerHTML = `
+    <div class="box"><h3>中継局</h3>
+      <div class="btns"><button id="place" class="${placing ? 'on' : 'main'}">${placing ? '地図をクリックして置く…(やめる)' : '＋ 中継局を置く'}</button></div>
+      <div style="margin-top:6px">${stList || '<div class="small muted">「中継局を置く」を押して地図をクリックすると、その地点から見通せる範囲を表示します。マーカーはドラッグで動かせます。</div>'}</div>
+      ${stations.length ? `<div class="small" style="margin-top:4px"><a class="act" id="stExp">中継局を書き出す</a> ・ <a class="act" id="stImp">読み込む</a> ・ <a class="act" id="stClr">すべて消す</a></div>` : `<div class="small" style="margin-top:4px"><a class="act" id="stImp">中継局のファイルを読み込む</a></div>`}
+    </div>
+    <div class="box"><h3>断面図</h3><div id="prof"></div></div>
+    <div class="box"><h3>計算の条件</h3><div class="grid2">
+      <span>首輪の高さ</span><span><input type="number" id="pRecv" value="${P.receiver}" min="0" max="10" step="0.1" style="width:70px"> m</span>
+      <span>最大距離</span><span><input type="number" id="pRad" value="${P.radius}" min="100" max="20000" step="100" style="width:90px"> m</span>
+      <span>周波数</span><span><input type="number" id="pFreq" value="${P.freq}" min="10" max="6000" step="1" style="width:90px"> MHz(断面図のフレネル計算)</span>
+      <span>解像度</span><span><select id="pRes">${[1, 2, 5, 10].map(r => `<option ${r === P.res ? 'selected' : ''} value="${r}">${r} m${r === 1 ? '(遅い)' : ''}</option>`).join('')}</select></span>
+      <span>新しい局の高さ</span><span><input type="number" id="pAnt" value="${P.antenna}" min="0.5" max="100" step="0.5" style="width:70px"> m</span>
+      <span></span><span class="small"><label><input type="checkbox" id="pCurv" ${P.curvature ? 'checked' : ''}> 地球の丸み・屈折(k=4/3)</label>
+        <label><input type="checkbox" id="pHid" ${P.showHidden ? 'checked' : ''}> 見通し外を赤で表示</label></span>
+    </div></div>
+    ${cov}${gpsBox}
+    <div class="box"><h3>DEM</h3><div class="small">${DEM ? `<b>${esc(DEM.name)}</b><br>${esc(crsName(DEM.epsg))} ・ ${nf(DEM.W)}×${nf(DEM.H)} ・ ${DEM.dx.toFixed(2)} m` : '読み込み中…'}</div>
+      <div class="small muted" style="margin-top:3px">黄色の点線がDEMの範囲です。範囲の外は計算できません(範囲の外の地形による遮蔽も考慮されません)。</div>
+      <div class="btns" style="margin-top:6px"><button id="dem">別のDEMを読み込む(.tif)</button></div></div>
+    <div class="small muted">計算は「首輪の高さの点が、中継局のアンテナから地形に遮られずに見えるか」の判定(幾何学的な見通し)です。樹木・建物、回折や反射は考慮していません。</div>`;
+  drawProfile();
+  const on = (id, ev, f) => { const e = $(id); if (e) e[ev] = f; };
+  on('place', 'onclick', () => { placing = !placing; $('map').classList.toggle('placing', placing); render(); });
+  const num = (id, key, re) => on(id, 'onchange', e => { const v = parseFloat(e.target.value); if (!Number.isFinite(v)) return; P[key] = v; saveState(); re ? re() : recompute(); });
+  num('pRecv', 'receiver'); num('pRad', 'radius'); num('pAnt', 'antenna', render); num('pFreq', 'freq', () => { drawProfile(); });
+  on('pRes', 'onchange', async e => { P.res = +e.target.value; saveState(); await buildGrid(); recompute(); });
+  on('pCurv', 'onchange', e => { P.curvature = e.target.checked; saveState(); recompute(); });
+  on('pHid', 'onchange', e => { P.showHidden = e.target.checked; saveState(); coverLayer.redraw(); });
+  on('dem', 'onclick', () => $('inDem').click());
+  on('stExp', 'onclick', exportStations); on('stImp', 'onclick', () => $('inSt').click());
+  on('stClr', 'onclick', () => { if (!confirm('中継局をすべて消しますか?')) return; stations = []; selId = null; target = null; saveState(); drawStations(); recompute(); });
+  on('covCsv', 'onclick', exportCoverage);
+  document.querySelectorAll('.st').forEach(row => {
+    const s = stations.find(x => x.id === row.dataset.id);
+    row.querySelectorAll('[data-k]').forEach(el => {
+      const k = el.dataset.k;
+      if (k === 'on') el.onchange = () => { s.on = el.checked; saveState(); drawStations(); combine(); coverLayer.redraw(); updateCoverage(); drawGps(); render(); };
+      if (k === 'ant') el.onchange = () => { const v = parseFloat(el.value); if (v > 0) { s.ant = v; saveState(); recompute([s.id]); } };
+      if (k === 'sel') el.onclick = () => { selId = s.id; saveState(); drawStations(); map.panTo([s.lat, s.lng]); render(); };
+      if (k === 'ren') el.onclick = () => { const n = prompt('中継局の名前', s.name); if (n) { s.name = n.trim(); saveState(); drawStations(); render(); } };
+      if (k === 'del') el.onclick = () => { if (!confirm(`「${s.name}」を削除しますか?`)) return; stations = stations.filter(x => x !== s); if (selId === s.id) selId = stations[0]?.id || null; saveState(); drawStations(); recompute(); };
+    });
+  });
+  document.querySelectorAll('tr[data-f]').forEach(tr => tr.onclick = () => { const f = FIELDS[+tr.dataset.f]; map.fitBounds(L.geoJSON(f).getBounds(), { maxZoom: 18 }); });
+}
+
+// ===================== 書き出し・読み込み =====================
+function save(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); }
+const today = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+function exportStations() {
+  save(`中継局_${today()}.geojson`, JSON.stringify({ type: 'FeatureCollection', 条件: { ...P }, features: stations.map(s => ({ type: 'Feature',
+    geometry: { type: 'Point', coordinates: [+s.lng.toFixed(7), +s.lat.toFixed(7)] },
+    properties: { 名前: s.name, アンテナ高_m: s.ant, 地盤標高_m: Number.isFinite(s.zg) ? +s.zg.toFixed(2) : null, 表示: s.on } })) }, null, 1), 'application/geo+json');
+}
+document.getElementById('inSt').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const g = JSON.parse(await f.text());
+    if (g.条件) Object.assign(P, g.条件);
+    (g.features || []).filter(x => x.geometry?.type === 'Point').forEach(x => {
+      const p = x.properties || {};
+      stations.push({ id: 'S' + Math.random().toString(36).slice(2, 9), name: p['名前'] || p.name || `中継局${nextNo++}`,
+        lng: x.geometry.coordinates[0], lat: x.geometry.coordinates[1], ant: +(p['アンテナ高_m'] ?? p.height ?? P.antenna), on: p['表示'] !== false, vis: null });
+    });
+    selId = stations[0]?.id || null; saveState(); drawStations(); await buildGrid(); recompute();
+    map.fitBounds(L.latLngBounds(stations.map(s => [s.lat, s.lng])).pad(0.5), { maxZoom: 16 });
+  } catch (err) { alert('読み込めませんでした:' + err.message); }
+};
+function exportCoverage() {
+  const F = CONFIG.fields, q = v => { const s = String(v ?? ''); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const rows = FIELDS.filter(f => f._cells).map(f => [f.properties[F.labelField], f.properties[F.colorField], (f._cov * 100).toFixed(1), nf(f._cells * G.rx * G.ry, 0).replace(/,/g, '')]);
+  const head = [F.labelField, F.colorField, '見通し率_%', '計算面積_m2'];
+  save(`圃場別見通し率_${today()}.csv`, '﻿' + [`# 中継局:${stations.filter(s => s.on).map(s => `${s.name}(${s.ant}m)`).join(' / ')} 首輪 ${P.receiver}m`, head.join(','), ...rows.map(r => r.map(q).join(','))].join('\r\n'), 'text/csv');
+}
+document.getElementById('inDem').onchange = async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try { await openDem(f, f.name); map.fitBounds(demFrame.getBounds()); recompute(); }
+  catch (err) { alert('DEMを読み込めませんでした:' + err.message); setStatus(''); }
+};
+
+// ===================== 起動 =====================
+(async () => {
+  render(); drawStations();
+  try { await openDem(CONFIG.dem.url, CONFIG.dem.name); } catch (e) { setStatus('DEMを読み込めません:' + e.message); }
+  if (!stations.length && DEM) map.fitBounds(demFrame.getBounds());
+  await loadFields();
+  await recompute();
+  if (CONFIG.gps?.api) { await loadGps(); setInterval(loadGps, CONFIG.gps.refreshMin * 60e3); }
+})();
+let here = null;
+document.getElementById('locate').onclick = () => map.locate({ setView: true, maxZoom: 17 });
+map.on('locationfound', e => { if (here) here.remove(); here = L.circleMarker(e.latlng, { radius: 8, color: '#fff', weight: 2, fillColor: '#1e88e5', fillOpacity: 1 }).addTo(map); });
+</script>
+</body>
+</html>
